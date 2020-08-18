@@ -166,7 +166,7 @@ class PANCardOCR(Resource):
                 return {'Msg':'Error','Description':'Unable to Perform OCR - Poor Image Quality.'}
             return ResponseDict
         except Exception as e:
-            raise e
+            print(e)
             return {'Msg':'Error','Description':'Unknown Exception Happened. Please make sure that the Image Orientation is upright.'}
 #################### Configure URLs #########################
 api.add_resource(PANCardOCR,'/PancardOCR')
