@@ -1,11 +1,13 @@
 ############################# Import Section ###########################################
 from flask import Flask, request
 from flask_restful import Resource, Api
-import base64,cv2
+import base64,cv2,os
 import numpy as np
 import pandas as pd
 import pytesseract as pt
 from pytesseract import Output
+import requests,random,string
+#from PIL import Image
 ########################## Create Flask App ###########################################
 app = Flask(__name__)
 # creating an API object
@@ -89,25 +91,58 @@ class PANCardOCR(Resource):
         try:
             ################ Get File Name and Minimum Matches From Request ###############
             data = request.get_json()
-            ImageData = data['ImageData']
+            ImageFile = data['ImageFile']
+            FileType=data['filetype']
+            DownloadDirectory="/mnt/tmp"
+            randomfivedigitnumber=random.randint(10000,99999)
+            letters = string.ascii_lowercase
+            randomfivecharacters=''.join(random.choice(letters) for i in range(5))
+            if FileType.lower()=="jpg":
+                FileName="File_"+str(randomfivedigitnumber)+"_"+randomfivecharacters+".jpg"
+            elif FileType.lower()=="jpeg":
+                FileName="File_"+str(randomfivedigitnumber)+"_"+randomfivecharacters+".jpeg"
+            elif FileType.lower()=="png":
+                FileName="File_"+str(randomfivedigitnumber)+"_"+randomfivecharacters+".png"
+            else:
+                return{'msg':'Error','description':'Unsupported File Extension'}
+            DownloadFilePath=DownloadDirectory+"/"+FileName
+            ################## Download File #######################
+            try:
+                response=requests.get(str(ImageFile))
+                if response.status_code != 200:
+                    return{'msg':'Error','description':'Unable to download file. Please check the file url and permissions again.'}
+            except:
+                return{'msg':'Error','description':'Unable to download file. Please check the file url and permissions again.'}
+            ############# Write downloaded file to local ##########
+            try:
+                with open(DownloadFilePath,'wb') as f:
+                    f.write(response.content)
+            except:
+                return{'msg':'Error','description':'Unable to save downloaded file.'}
             ################ Read Image from Base64 string ################################
             try:
-                CurrentImage=readb64(ImageData)
+                CurrentImage=cv2.imread(DownloadFilePath)
+                print(CurrentImage.shape)
+                os.remove(DownloadFilePath)
+                #CurrentImage=readb64(ImageData)
             except:
+                os.remove(DownloadFilePath)
                 return {'Msg':'Error','Description':'Unable to convert base 64 string to Image'}
             ################ Preprocess Image #####################################
             try:
                 PANCardImageProcessed1=PreprocessPANImageType1(CurrentImage)
                 PANCardImageProcessed2=PreprocessPANImageType2(CurrentImage)
                 PANCardImageProcessed3=PreprocessPANImageType3(CurrentImage)
-            except:
+            except Exception as e:
+                print(e)
                 return {'Msg':'Error','Description':'Unable to preprocess Image'}
             #################### Perform OCR #####################################
             try:
                 PANCardImageProcessed1DF=PerformOCR(PANCardImageProcessed1)
                 PANCardImageProcessed2DF=PerformOCR(PANCardImageProcessed2)
                 PANCardImageProcessed3DF=PerformOCR(PANCardImageProcessed3)
-            except:
+            except Exception as e:
+                print(e)
                 return {'Msg':'Error','Description':'Corrupted Image - Unable to Perform OCR'}
             ########### Compare Dataframe to get common values ###################
             res=PANCardImageProcessed1DF[PANCardImageProcessed1DF['Word'].str.strip().isin(list(PANCardImageProcessed2DF['Word']))]
