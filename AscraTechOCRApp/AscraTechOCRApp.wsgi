@@ -1,3 +1,3 @@
 import sys
-sys.path.insert(0, '/var/www/html/AscraTechOCRApp')
-from AscraTechOCRApp import app as application
+sys.path.insert(0, '/var/www/html/ascratechocrapp')
+from ascratechocrapp import app as application
