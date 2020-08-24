@@ -7,6 +7,10 @@ import pandas as pd
 import pytesseract as pt
 from pytesseract import Output
 import requests,random,string
+from google.cloud import vision
+from google.cloud.vision import types
+from google.protobuf.json_format import MessageToDict
+import io
 #from PIL import Image
 ########################## Create Flask App ###########################################
 app = Flask(__name__)
@@ -47,7 +51,7 @@ def CalculateRight(row):
     current_width=row[4]
     return current_left+current_width
 ################### OCR Function #####################################
-def PerformOCR(GrayScaleImage):
+def PerformOCRTesseract(GrayScaleImage):
     content=pt.image_to_data(GrayScaleImage,output_type=Output.DICT)
     Words=list(content['text'])
     left=list(content['left'])
@@ -65,6 +69,42 @@ def PerformOCR(GrayScaleImage):
     res=res[['Word','Top','Left','Bottom','Right']]
     res=res.sort_values(by=['Top','Left'])
     return res
+############## OCR Using Google Vision API ##########################
+def PerformOCRGoogleVisionAPI(current_input_file_path):
+    with io.open(current_input_file_path, 'rb') as gen_image_file:
+        content = gen_image_file.read()
+    try:
+        client = vision.ImageAnnotatorClient()
+        image = vision.types.Image(content=content)
+        response = client.text_detection(image=image)
+        DictResponse=MessageToDict(response)
+        WordsAndCoordinates=DictResponse['textAnnotations'][1:]
+        word_list=[]
+        llx_list=[]
+        lly_list=[]
+        lrx_list=[]
+        lry_list=[]
+        urx_list=[]
+        ury_list=[]
+        ulx_list=[]
+        uly_list=[]
+        for i in range(0,len(WordsAndCoordinates)):
+            word_list.append(WordsAndCoordinates[i]['description'])
+            llx_list.append(WordsAndCoordinates[i]['boundingPoly']['vertices'][0]['x'])
+            lly_list.append(WordsAndCoordinates[i]['boundingPoly']['vertices'][0]['y'])
+            lrx_list.append(WordsAndCoordinates[i]['boundingPoly']['vertices'][1]['x'])
+            lry_list.append(WordsAndCoordinates[i]['boundingPoly']['vertices'][1]['y'])
+            urx_list.append(WordsAndCoordinates[i]['boundingPoly']['vertices'][2]['x'])
+            ury_list.append(WordsAndCoordinates[i]['boundingPoly']['vertices'][2]['y'])
+            ulx_list.append(WordsAndCoordinates[i]['boundingPoly']['vertices'][3]['x'])
+            uly_list.append(WordsAndCoordinates[i]['boundingPoly']['vertices'][3]['y'])
+                ##################### Create Dictionary for the lists #####################
+            WordsAndCoordinatesDict={"Word":word_list,'llx':llx_list,'lly':lly_list,'lrx':lrx_list,'lry':lry_list,'urx':urx_list,'ury':ury_list,'ulx':ulx_list,'uly':uly_list}
+                ####################### Create Dataframe ######################
+            WordsAndCoordinatesDF = pd.DataFrame.from_dict(WordsAndCoordinatesDict)
+        return WordsAndCoordinatesDF
+    except:
+        return "Error"
 ######### PAN Card OCR ##########
 class PANCardOCR(Resource):
     def post(self):
@@ -92,23 +132,17 @@ class PANCardOCR(Resource):
                 if response.status_code != 200:
                     return{'msg':'Error','description':'Unable to download file. Please check the file url and permissions again.'}
             except:
-                print("################")
-                print("Response-Error")
-                print("################")
                 return{'msg':'Error','description':'Unable to download file. Please check the file url and permissions again.'}
             ############# Write downloaded file to local ##########
             try:
                 with open(DownloadFilePath,'wb') as f:
                     f.write(response.content)
             except:
-                print("################")
-                print("Response-Error")
-                print("################")
                 return{'msg':'Error','description':'Unable to save downloaded file.'}
             ################ Read Image from Base64 string ################################
             try:
                 CurrentImage=cv2.imread(DownloadFilePath)
-                os.remove(DownloadFilePath)
+                #os.remove(DownloadFilePath)
             except:
                 os.remove(DownloadFilePath)
                 return {'Msg':'Error','Description':'Unable to convert base 64 string to Image'}
@@ -119,14 +153,11 @@ class PANCardOCR(Resource):
                 PANCardImageProcessed2=PreprocessPANImageType2(IlluminatedPANCard)
             except Exception as e:
                 print(e)
-                print("################")
-                print("Response-Error")
-                print("################")
                 return {'Msg':'Error','Description':'Unable to preprocess Image'}
             #################### Perform OCR #####################################
             try:
-                PANCardImageProcessed1DF=PerformOCR(PANCardImageProcessed1)
-                PANCardImageProcessed2DF=PerformOCR(PANCardImageProcessed2)
+                PANCardImageProcessed1DF=PerformOCRTesseract(PANCardImageProcessed1)
+                PANCardImageProcessed2DF=PerformOCRTesseract(PANCardImageProcessed2)
                 PANCardImageProcessed1DF=PANCardImageProcessed1DF[PANCardImageProcessed1DF['Word'].isin(list(PANCardImageProcessed2DF['Word']))]
                 PANCardImageProcessed1DF=PANCardImageProcessed1DF.reset_index(drop=True)
                 res=PANCardImageProcessed1DF.copy()
@@ -142,9 +173,6 @@ class PANCardOCR(Resource):
                     newres=newres[newres['Right']<GovtRowLeft]
             except Exception as e:
                 print(e)
-                print("################")
-                print("Response-Error")
-                print("################")
                 return {'Msg':'Error','Description':'Corrupted Image - Unable to Perform OCR'}
             ################ Fetch Name #########################################
             Name=""
@@ -163,16 +191,17 @@ class PANCardOCR(Resource):
                 DateOfBirth=list(DateOfBirthDF['Word'])[0]
             ############### Fetch Father's Name #################################
             FatherName=""
-            NameBottom=max(list(WholeNameDF['Bottom']))
-            if DateOfBirth!="":
-                DateOfBirthTop=list(DateOfBirthDF['Top'])[0]
-                FatherNameDF=newres[(newres['Top']>NameBottom+20) & (newres['Bottom']<DateOfBirthTop)]
-                if FatherNameDF.shape[0]==0:
-                    FatherNameDF=PANCardImageProcessed1DF[(PANCardImageProcessed1DF['Top']>NameBottom+10) & (PANCardImageProcessed1DF['Bottom']<DateOfBirthTop)]
-            else:
-                FatherNameDF=newres[(newres['Top']>NameBottom+10) & (newres['Bottom']<NameBottom+70)]
-            FatherNameDF=FatherNameDF.sort_values(by='Left')
-            FatherName=" ".join(list(FatherNameDF['Word']))
+            if Name != "":
+                NameBottom=max(list(WholeNameDF['Bottom']))
+                if DateOfBirth!="":
+                    DateOfBirthTop=list(DateOfBirthDF['Top'])[0]
+                    FatherNameDF=newres[(newres['Top']>NameBottom+20) & (newres['Bottom']<DateOfBirthTop)]
+                    if FatherNameDF.shape[0]==0:
+                        FatherNameDF=PANCardImageProcessed1DF[(PANCardImageProcessed1DF['Top']>NameBottom+10) & (PANCardImageProcessed1DF['Bottom']<DateOfBirthTop)]
+                else:
+                    FatherNameDF=newres[(newres['Top']>NameBottom+10) & (newres['Bottom']<NameBottom+70)]
+                FatherNameDF=FatherNameDF.sort_values(by='Left')
+                FatherName=" ".join(list(FatherNameDF['Word']))
             ###### Try to Fetch DOB Again based on Father's Name if it's blank #######
             if DateOfBirth=="":
                 DateOfBirthDF=PANCardImageProcessed1DF[PANCardImageProcessed1DF['Word'].str.contains("/")]
@@ -185,26 +214,84 @@ class PANCardOCR(Resource):
                 PANNumber=list(PANNumberSeries)[0]
                 PANNumber.upper()
             ############# Create Response Dict ###############################
-            print("Name: ",Name," || Father's Name: ",FatherName," || DateOfBirth: ",DateOfBirth," || PANNumber: ",PANNumber)
             if ((PANNumber=="") and (DateOfBirth=="")):
-                print("################")
-                print("Response-Error")
-                print("################")
+                ################# Since Tesseract Failed So Calling Google Vision API ######################################
+                try:
+                    ################ Get Dataframe from Google Vision API ######################
+                    WordsAndCoordinatesDF=PerformOCRGoogleVisionAPI(DownloadFilePath)
+                    os.remove(DownloadFilePath)
+                    ################ Check Response from Google Vision API ######################
+                    if str(type(WordsAndCoordinatesDF)) != "<class 'pandas.core.frame.DataFrame'>":
+                        return {'Msg':'Error','Description':'Unable to Perform OCR using Google Vision API - Poor Image Quality.'}
+                    else:
+                        try:
+                            ################ Filter Dataframe ######################
+                            res=WordsAndCoordinatesDF.copy()
+                            res=res[res['Word'].str.match(r"^[A-Za-z0-9/]*$")==True]
+                            DepartmentRow=res[(res['Word'].str.lower().str.contains("dep")) | (res['Word'].str.lower().str.contains("inc")) | (res['Word'].str.lower().str.contains("gov")) | (res['Word'].str.lower().str.contains("indi"))]
+                            if DepartmentRow.shape[0]!=0:
+                                DepartmentTop=DepartmentRow['lly'].max()
+                                newres=res[res['lly']>DepartmentTop+10]
+                            ############# Fetch Name #####################
+                            Name=""
+                            NameTop=list(newres['uly'])
+                            if len(NameTop)!=0:
+                                NameTop=NameTop[0]
+                                NameTopUL=NameTop-10
+                                NameTopLL=NameTop+10
+                                WholeNameDF=newres[newres['uly'].between(NameTopUL,NameTopLL)]
+                                WholeNameDF=WholeNameDF.sort_values(by='ulx')
+                                Name=" ".join(WholeNameDF['Word'])
+                            ############# Fetch Date Of Birth #####################
+                            DateOfBirth=""
+                            DateOfBirthDF=newres[newres['Word'].str.contains("/")]
+                            if len(list(DateOfBirthDF['Word']))!=0:
+                                DateOfBirth=list(DateOfBirthDF['Word'])[0]
+                            ############# Fetch Father's Name #####################
+                            FatherName=""
+                            if Name!="":
+                                NameBottom=max(list(WholeNameDF['lly']))
+                                if DateOfBirth!="":
+                                    DateOfBirthTop=list(DateOfBirthDF['uly'])[0]
+                                    FatherNameDF=newres[(newres['lly']>NameBottom+15) & (newres['uly']<DateOfBirthTop)]
+                                    if FatherNameDF.shape[0]!=0:
+                                        FatherNameDF=FatherNameDF.sort_values(by='ulx')
+                                        FatherName=" ".join(FatherNameDF['Word'])
+                                else:
+                                    FatherNameDF=newres[(newres['uly']>NameBottom+10) & (newres['lly']<NameBottom+70)]
+                                FatherNameDF=FatherNameDF.sort_values(by='ulx')
+                                FatherName=" ".join(list(FatherNameDF['Word']))
+                            ############# Fetch PAN Number #####################
+                            PANNumber=''
+                            PANNumberSeries=newres[(newres['Word'].str.match(r'^(?=.*[a-zA-Z])(?=.*[0-9])[A-Za-z0-9]+$')==True) & (newres['Word'].str.len()==10)]['Word']
+                            if len(list(PANNumberSeries))!=0:
+                                PANNumber=list(PANNumberSeries)[0]
+                                PANNumber.upper()
+                            ############### Create Response Dict #######################
+                            print("Name: ",Name," || Father's Name: ",FatherName," || DateOfBirth: ",DateOfBirth," || PANNumber: ",PANNumber)
+                            if ((PANNumber=="") and (DateOfBirth=="")):
+                                return {'Msg':'Error','Description':'Unable to Perform OCR - Poor Image Quality.'}
+                            else:
+                                ResponseDict=dict(Msg='Success',Name=Name,FatherName=FatherName,DateOfBirth=DateOfBirth,PANNumber=PANNumber,Method="GoogleVisionAPI")
+                                return ResponseDict
+                        except Exception as e:
+                            print(e)
+                            return {'Msg':'Error','Description':'Unable to Perform OCR - Poor Image Quality.'}
+                except Exception as e:
+                    print(e)
+                    return {'Msg':'Error','Description':'Unable to Perform OCR - Poor Image Quality.'}
                 return {'Msg':'Error','Description':'Unable to Perform OCR - Poor Image Quality.'}
             else:
-                print("################")
-                print("Response-Success")
-                print("################")
-                ResponseDict=dict(Msg='Success',Name=Name,FatherName=FatherName,DateOfBirth=DateOfBirth,PANNumber=PANNumber)
-            return ResponseDict
+                os.remove(DownloadFilePath)
+                print("Name: ",Name," || Father's Name: ",FatherName," || DateOfBirth: ",DateOfBirth," || PANNumber: ",PANNumber)
+                ResponseDict=dict(Msg='Success',Name=Name,FatherName=FatherName,DateOfBirth=DateOfBirth,PANNumber=PANNumber,Method="Tesseract")
+                return ResponseDict
         except Exception as e:
             print(e)
-            print("################")
-            print("Response-Error")
-            print("################")
+            os.remove(DownloadFilePath)
             return {'Msg':'Error','Description':'Unknown Exception Happened. Please make sure that the Image Orientation is upright.'}
 #################### Configure URLs #########################
 api.add_resource(PANCardOCR,'/PancardOCR')
 #################  Run Flask Server ##########################
 if __name__ == '__main__':
-    app.run(debug = True)
+    app.run(debug = True,host='0.0.0.0')
