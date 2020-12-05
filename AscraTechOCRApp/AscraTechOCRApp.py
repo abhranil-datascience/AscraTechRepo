@@ -119,7 +119,53 @@ def PerformAadharBackOCRTesseract(GrayScaleImage):
     res=res[['Word','Top','Left','Bottom','Right']]
     res['Word']=res['Word'].str.upper().str.strip()
     return res
-################### Fucntion to Reform Google Vision API Dataframe ###################
+def PerformPassportFrontOCRTesseract(GrayScaleImage):
+    content=pt.image_to_data(GrayScaleImage,output_type=Output.DICT)
+    Words=list(content['text'])
+    left=list(content['left'])
+    top=list(content['top'])
+    width=list(content['width'])
+    height=list(content['height'])
+    content_dict=dict(Word=Words,Left=left,Top=top,Height=height,Width=width)
+    ConvertedImageDF=pd.DataFrame.from_dict(content_dict)
+    ConvertedImageDF['Bottom']=ConvertedImageDF.apply(func=CalculateBottom,axis=1)
+    ConvertedImageDF['Right']=ConvertedImageDF.apply(func=CalculateRight,axis=1)
+    ConvertedImageDF=ConvertedImageDF[['Word','Top','Left','Bottom','Right']]
+    print("#################################################")
+    print("")
+    print("List of Word: ",list(ConvertedImageDF['Word']))
+    print("")
+    print("#################################################")
+    return ConvertedImageDF
+################## Clean OCR Data ####################################
+def RemoveHindiCharacters(WordList):
+    TempWordList=[]
+    for word in WordList:
+        ValidCharacters = [c for c in word if ord(c) < 128]
+        TempWordList.append("".join(ValidCharacters).strip())
+    return TempWordList
+def CleanText(WordList):
+    TempWordList=[]
+    for word in WordList:
+        if "/" in word:
+            if word.replace("/","").isalpha():
+                TempWordList.append(word.replace("/",""))
+            else:
+                TempWordList.append(word)
+        else:
+            TempWordList.append(word)
+    return TempWordList
+def CleanPassportFrontData(CurrentDF):
+    CurrentDF=CurrentDF[CurrentDF['Word'].str.strip().str.len()>0]
+    CurrentDF['Word']=CurrentDF['Word'].str.replace(",","")
+    CurrentDF['Word']=RemoveHindiCharacters(list(CurrentDF['Word']))
+    CurrentDF=CurrentDF[(CurrentDF['Word'].str.match(r'(^[a-zA-Z0-9/:<.]*$)')==True)]
+    CurrentDF['Word']=CurrentDF['Word'].str.upper().str.strip()
+    CurrentDF['Word']=CleanText(list(CurrentDF['Word']))
+    CurrentDF = CurrentDF[CurrentDF['Word']!="/"]
+    CurrentDF = CurrentDF[CurrentDF['Word']!=""]
+    return CurrentDF
+################### Function to Reform Google Vision API Dataframe ###################
 def CreateTop(row):
     current_uly=row[8]
     current_ury=row[6]
@@ -169,13 +215,28 @@ def PerformOCRGoogleVisionAPI(current_input_file_path):
             ury_list.append(WordsAndCoordinates[i]['boundingPoly']['vertices'][2]['y'])
             ulx_list.append(WordsAndCoordinates[i]['boundingPoly']['vertices'][3]['x'])
             uly_list.append(WordsAndCoordinates[i]['boundingPoly']['vertices'][3]['y'])
-                ##################### Create Dictionary for the lists #####################
-            WordsAndCoordinatesDict={"Word":word_list,'llx':llx_list,'lly':lly_list,'lrx':lrx_list,'lry':lry_list,'urx':urx_list,'ury':ury_list,'ulx':ulx_list,'uly':uly_list}
-                ####################### Create Dataframe ######################
-            WordsAndCoordinatesDF = pd.DataFrame.from_dict(WordsAndCoordinatesDict)
+        ##################### Create Dictionary for the lists #####################
+        WordsAndCoordinatesDict={"Word":word_list,'llx':llx_list,'lly':lly_list,'lrx':lrx_list,'lry':lry_list,'urx':urx_list,'ury':ury_list,'ulx':ulx_list,'uly':uly_list}
+        ####################### Create Dataframe ######################
+        WordsAndCoordinatesDF = pd.DataFrame.from_dict(WordsAndCoordinatesDict)
+        print(list(WordsAndCoordinatesDF['Word']))
         return WordsAndCoordinatesDF
     except:
         return "Error"
+################### Function to fetch Valid Values #####################################
+def GetValidValues(CurrentDF):
+    ValidValues=[]
+    for ind in CurrentDF.index:
+        if ind == 0:
+            ValidValues.append(CurrentDF['Word'][ind])
+        else:
+            current_left = CurrentDF['Left'][ind]
+            previous_right = CurrentDF['Right'][ind-1]
+            if current_left - previous_right > 60:
+                break
+            else:
+                ValidValues.append(CurrentDF['Word'][ind])
+    return " ".join(ValidValues).strip()
 ######### PAN Card OCR ##########
 class PANCardOCR(Resource):
     def post(self):
@@ -740,10 +801,384 @@ class AadharBackOCR(Resource):
         except Exception as e:
             print(e)
             return {'Msg':'Error','Description':'Unknown Exception Happened. Please make sure that the Image Orientation is upright.'}
+class PassportFrontOCR(Resource):
+    def post(self):
+        try:
+            ############### Initialize Variables ###########################
+            PassportNumber=""
+            Surname=""
+            GivenName=""
+            Nationality=""
+            Sex=""
+            DateOfBirth=""
+            PlaceOfBirth=""
+            PlaceOfIssue=""
+            DateOfIssue=""
+            DateOfExpiry=""
+            ListOfPlaceOfIssue = ['AHMEDABAD','AMRITSAR','BANGALORE','BAREILLY','BHOPAL','BHUBANESWAR','CHANDIGARH','CHENNAI',
+            'COIMBATORE','CUDDALORE','DEHRADUN','DELHI','DHULE','GHAZIABAD','GUWAHATI','HYDERABAD','JAIPUR','JALANDHAR','JAMMU','KOCHI','KOLKATA',
+            'KOZHIKODE','LUCKNOW','MADURAI','MALAPPURAM','MUMBAI','NAGPUR','PANAJI','PATNA','PUNE','RAIPUR','RANCHI','SHIMLA','SRINAGAR','SURAT',
+            'THANE','THIRUVANANTHAPURAM','TIRUCHIRAPPALLI','VISAKHAPATNAM']
+            ################ Get File Name and Minimum Matches From Request ###############
+            data = request.get_json()
+            ImageFile = data['ImageFile']
+            FileType=data['filetype']
+            DownloadDirectory="/mnt/tmp"
+            randomfivedigitnumber=random.randint(10000,99999)
+            letters = string.ascii_lowercase
+            randomfivecharacters=''.join(random.choice(letters) for i in range(5))
+            if FileType.lower()=="jpg":
+                FileName="File_"+str(randomfivedigitnumber)+"_"+randomfivecharacters+".jpg"
+            elif FileType.lower()=="jpeg":
+                FileName="File_"+str(randomfivedigitnumber)+"_"+randomfivecharacters+".jpeg"
+            elif FileType.lower()=="png":
+                FileName="File_"+str(randomfivedigitnumber)+"_"+randomfivecharacters+".png"
+            else:
+                return{'msg':'Error','description':'Unsupported File Extension'}
+            DownloadFilePath=DownloadDirectory+"/"+FileName
+            ################## Download File #######################
+            try:
+                response=requests.get(str(ImageFile))
+                if response.status_code != 200:
+                    return{'msg':'Error','description':'Unable to download file. Please check the file url and permissions again.'}
+            except:
+                return{'msg':'Error','description':'Unable to download file. Please check the file url and permissions again.'}
+            ############# Write downloaded file to local ##########
+            try:
+                with open(DownloadFilePath,'wb') as f:
+                    f.write(response.content)
+            except:
+                return{'msg':'Error','description':'Unable to save downloaded file.'}
+            ################ Read Image from Base64 string ################################
+            try:
+                CurrentImage=cv2.imread(DownloadFilePath)
+                GrayImage=cv2.cvtColor(CurrentImage, cv2.COLOR_BGR2GRAY)
+                #cv2.imwrite("Test.jpg", CurrentImage)
+                #os.remove(DownloadFilePath)
+            except:
+                os.remove(DownloadFilePath)
+                return {'Msg':'Error','Description':'Unable to read downladed image.'}
+            #################### Perform OCR using Tesseract #####################################
+            try:
+                ConvertedImageDF=PerformPassportFrontOCRTesseract(CurrentImage)
+                ConvertedImageDF=CleanPassportFrontData(ConvertedImageDF)
+                print(list(ConvertedImageDF['Word']))
+            except Exception as e:
+                print(e)
+                os.remove(DownloadFilePath)
+                return {'Msg':'Error','Description':'Corrupted Image - Unable to Perform OCR'}
+            try:
+                ################## Check if Tesseract returned all valid keywords #######################
+                TesseractWorks=False
+                DatesValid=False
+                PassportNumberValid=False
+                PlaceValid=False
+                SurnameValid=False
+                GivenNameValid=False
+                NationalityValid=False
+                FirstPlaceTop=""
+                ############# Validity Check For Dates and Passport ################
+                Dates=[]
+                for word in list(ConvertedImageDF['Word']):
+                    if re.match(r"^[0-9]{2}\/[0-9]{2}\/[0-9]{4}$",word.strip()):
+                        Dates.append(word.strip())
+                    elif re.match(r"^[A-Z]{1}[0-9]{7}$",word.strip()):
+                        PassportNumber = word.strip()
+                DatesValid = len(Dates) == 3
+                print("Dates Valid: ",DatesValid)
+                print("")
+                PassportNumberValid = PassportNumber!=""
+                print("Passport Number Valid: ",PassportNumberValid)
+                print("")
+                ############# Validity Check For Place ################
+                PlaceDF = ConvertedImageDF[(ConvertedImageDF['Word'].str.startswith('PLA')) | (ConvertedImageDF['Word'].str.endswith('ACE'))].reset_index(drop=True)
+                PlaceValid = PlaceDF.shape[0]==2
+                print("Place Valid: ",PlaceValid)
+                print("")
+                ############# Validity Check For Surname ################
+                SurnameDF = ConvertedImageDF[(ConvertedImageDF['Word'].str.endswith("URNAME")) | (ConvertedImageDF['Word'].str.startswith("SURN"))]
+                SurnameValid = SurnameDF.shape[0] == 1
+                print("Surname Valid: ",SurnameValid)
+                print("")
+                ############# Validity Check For Given Name ################
+                GivenDF = ConvertedImageDF[(ConvertedImageDF['Word'].str.endswith("VEN")) | (ConvertedImageDF['Word'].str.startswith("GIV"))]
+                GivenNameValid = GivenDF.shape[0] == 1
+                print("Given Name Valid: ",GivenNameValid)
+                print("")
+                ############# Validity Check For Nationality ################
+                NationalityDF = ConvertedImageDF[(ConvertedImageDF['Word'].str.startswith("NATION")) | (ConvertedImageDF['Word'].str.endswith("NALITY"))]
+                NationalityValid = NationalityDF.shape[0] == 1
+                print("Nationality Valid: ",NationalityValid)
+                print("")
+                ############ Validity Check for whole dataframe
+                TesseractWorks = DatesValid and PassportNumberValid and PlaceValid and SurnameValid and GivenNameValid and NationalityValid
+            except Exception as e:
+                print(e)
+                os.remove(DownloadFilePath)
+                return {'Msg':'Error','Description':'Unable to check if all required keywords are present or not in Tesseract output'}
+            ########################## Proceed with tesseract output if Tesseract works ####################################
+            if TesseractWorks:
+                ################ Get Date Of Birth, Issue and Expiry ##################################
+                try:
+                    DatesDF = ConvertedImageDF[ConvertedImageDF['Word'].isin(Dates)]
+                    PlaceBottom = PlaceDF['Bottom'][0]
+                    DOBDF = DatesDF[DatesDF['Bottom']<PlaceBottom].reset_index(drop=True)
+                    OtherDates = DatesDF[DatesDF['Top']>PlaceBottom].reset_index(drop=True)
+                    if DOBDF.shape[0] == 1:
+                        DateOfBirth = DOBDF['Word'][0]
+                    if OtherDates.shape[0] == 2:
+                        OtherDates = OtherDates.sort_values(by='Left').reset_index(drop=True)
+                        DateOfIssue = OtherDates['Word'][0].strip()
+                        DateOfExpiry = OtherDates['Word'][1].strip()
+                except Exception as e:
+                    print(e)
+                    os.remove(DownloadFilePath)
+                    return {'Msg':'Error','Description':'Unable to get dates from Tesseract output'}
+                ####################### Get Sex #########################################
+                try:
+                    for word in list(ConvertedImageDF['Word']):
+                        if word.strip() == "F":
+                            Sex = "Female"
+                            break
+                        elif word.strip() == "M":
+                            Sex = "Male"
+                            break
+                except Exception as e:
+                    print(e)
+                    os.remove(DownloadFilePath)
+                    return {'Msg':'Error','Description':'Unable to get Sex from Tesseract output'}
+                ################ Get Surname and Given Names ################################
+                try:
+                    SurnameBottom = list(SurnameDF['Bottom'])[0]
+                    GivenTop = list(GivenDF['Top'])[0]
+                    GivenBottom = list(GivenDF['Bottom'])[0]
+                    NationalityTop = list(NationalityDF['Top'])[0]
+                    SurnameValueDF = ConvertedImageDF[(ConvertedImageDF['Top'] > SurnameBottom) & (ConvertedImageDF['Bottom'] < GivenTop+10)]
+                    SurnameValueDF=SurnameValueDF.sort_values(by='Left').reset_index(drop=True)
+                    Surname = GetValidValues(SurnameValueDF)
+                    GivenNameDF = ConvertedImageDF[(ConvertedImageDF['Top'] > GivenBottom) & (ConvertedImageDF['Bottom'] < NationalityTop+10)]
+                    GivenNameDF=GivenNameDF.sort_values(by='Left').reset_index(drop=True)
+                    GivenName = GetValidValues(GivenNameDF)
+                except Exception as e:
+                    print(e)
+                    os.remove(DownloadFilePath)
+                    return {'Msg':'Error','Description':'Unable to get Surname and Given Name from Tesseract output'}
+                ##################### Get Place Of Issue and Place Of Birth #####################################
+                try:
+                    PlaceDFSorted = PlaceDF.sort_values(by='Top').reset_index(drop=True)
+                    LastPlaceBottom = PlaceDFSorted['Bottom'][1]
+                    ConvertedImageDFAfterPlaceOfIssue = ConvertedImageDF[ConvertedImageDF['Bottom'] > LastPlaceBottom]
+                    ConvertedImageDFAfterPlaceOfIssue = ConvertedImageDFAfterPlaceOfIssue.sort_values(by='Top')
+                    AfterPlaceOfIssueWords=list(ConvertedImageDFAfterPlaceOfIssue['Word'])
+                    for word in AfterPlaceOfIssueWords:
+                        for place in ListOfPlaceOfIssue:
+                            if place in word.strip():
+                                PlaceOfIssue = place
+                                break
+                    FirstPlaceBottom = PlaceDFSorted['Bottom'][0]
+                    FirstPlaceTop = PlaceDFSorted['Top'][0]
+                    PlaceOfBirthDF = ConvertedImageDF[(ConvertedImageDF['Bottom'] > FirstPlaceBottom+10) &
+                                                      (ConvertedImageDF['Bottom'] < LastPlaceBottom-10)]
+                    PlaceOfBirthDF = PlaceOfBirthDF.sort_values(by='Left').reset_index(drop=True)
+                    PlaceOfBirth = GetValidValues(PlaceOfBirthDF)
+                except Exception as e:
+                    print(e)
+                    os.remove(DownloadFilePath)
+                    return {'Msg':'Error','Description':'Unable to get Place Of Issue and Place Of Birth from Tesseract output'}
+                ########################## Get Nationality #########################################
+                try:
+                    if (FirstPlaceTop != ""):
+                        NationalityBottom = list(NationalityDF['Bottom'])[0]
+                        NationalityValuesDF = ConvertedImageDF[(ConvertedImageDF['Bottom']>NationalityBottom) &
+                        (ConvertedImageDF['Bottom']<FirstPlaceTop)]
+                        print(NationalityValuesDF)
+                        NationalityValuesDF = NationalityValuesDF.sort_values(by='Left').reset_index(drop=True)
+                        Nationality = GetValidValues(NationalityValuesDF).split()[0]
+                except Exception as e:
+                    print(e)
+                    os.remove(DownloadFilePath)
+                    return {'Msg':'Error','Description':'Unable to get Nationality from Tesseract output'}
+                ###################### Return Response ################################
+                ResponseDict=dict(Msg='Success',PassportNumber=PassportNumber,Surname=Surname,GivenName=GivenName,
+                Nationality=Nationality,Sex=Sex,DateOfBirth=DateOfBirth,PlaceOfIssue=PlaceOfIssue,
+                DateOfIssue=DateOfIssue,DateOfExpiry=DateOfExpiry,Method="Tesseract")
+                return ResponseDict
+            else:
+                print("Unable to Fetch Values using Tesseract so proceeeding for Google Vision API !!")
+                print("")
+                ################ Get Dataframe from Google Vision API ######################
+                try:
+                    CurrentImage=cv2.imread(DownloadFilePath)
+                    GrayImage=cv2.cvtColor(CurrentImage, cv2.COLOR_BGR2GRAY)
+                    cv2.imwrite(DownloadFilePath,GrayImage)
+                    WordsAndCoordinatesDF=PerformOCRGoogleVisionAPI(DownloadFilePath)
+                    os.remove(DownloadFilePath)
+                    ################ Check Response from Google Vision API ######################
+                    if str(type(WordsAndCoordinatesDF)) != "<class 'pandas.core.frame.DataFrame'>":
+                        return {'Msg':'Error','Description':'Unable to Perform OCR using Google Vision API - Poor Image Quality.'}
+                except Exception as e:
+                    print(e)
+                    if os.path.exists(DownloadFilePath):
+                        os.remove(DownloadFilePath)
+                    return {'Msg':'Error','Description':'Unable to perform OCR using Google Vision API.'}
+                ################ Get top, bottom, left, right from Google Vision API ######################
+                try:
+                    ConvertedImageDF = WordsAndCoordinatesDF.copy()
+                    ConvertedImageDF['Top']=ConvertedImageDF.apply(func=CreateTop,axis=1)
+                    ConvertedImageDF['Bottom']=ConvertedImageDF.apply(func=CreateBottom,axis=1)
+                    ConvertedImageDF['Left']=ConvertedImageDF.apply(func=CreateLeft,axis=1)
+                    ConvertedImageDF['Right']=ConvertedImageDF.apply(func=CreateRight,axis=1)
+                    ConvertedImageDF=ConvertedImageDF[['Word','Top','Bottom','Left','Right']]
+                    print(list(ConvertedImageDF['Word']))
+                except Exception as e:
+                    print(e)
+                    return {'Msg':'Error','Description':'Unable to create top/bottom/left/right from Google Vision API response.'}
+                ################ Clean Passport Front Page Data #############################
+                try:
+                    ConvertedImageDF = CleanPassportFrontData(ConvertedImageDF)
+                except Exception as e:
+                    print(e)
+                    return {'Msg':'Error','Description':'Unable to clean Google Vision API response.'}
+                ################## Check if Google Vision API returned all valid keywords #######################
+                try:
+                    GVAWorks=False
+                    DatesValid=False
+                    PassportNumberValid=False
+                    PlaceValid=False
+                    SurnameValid=False
+                    GivenNameValid=False
+                    NationalityValid=False
+                    FirstPlaceTop=""
+                    ############# Validity Check For Dates and Passport ################
+                    Dates=[]
+                    for word in list(ConvertedImageDF['Word']):
+                        if re.match(r"^[0-9]{2}\/[0-9]{2}\/[0-9]{4}$",word.strip()):
+                            Dates.append(word.strip())
+                        elif re.match(r"^[A-Z]{1}[0-9]{7}$",word.strip()):
+                            PassportNumber = word.strip()
+                    DatesValid = len(Dates) == 3
+                    print("Dates Valid: ",DatesValid)
+                    print("")
+                    PassportNumberValid = PassportNumber!=""
+                    print("Passport Number Valid: ",PassportNumberValid)
+                    print("")
+                    ############# Validity Check For Place ################
+                    PlaceDF = ConvertedImageDF[(ConvertedImageDF['Word'].str.startswith('PLA')) | (ConvertedImageDF['Word'].str.endswith('ACE'))].reset_index(drop=True)
+                    PlaceValid = PlaceDF.shape[0]==2
+                    print("Place Valid: ",PlaceValid)
+                    print("")
+                    ############# Validity Check For Surname ################
+                    SurnameDF = ConvertedImageDF[(ConvertedImageDF['Word'].str.endswith("URNAME")) | (ConvertedImageDF['Word'].str.startswith("SURN"))]
+                    SurnameValid = SurnameDF.shape[0] == 1
+                    print("Surname Valid: ",SurnameValid)
+                    print("")
+                    ############# Validity Check For Given Name ################
+                    GivenDF = ConvertedImageDF[(ConvertedImageDF['Word'].str.endswith("VEN")) | (ConvertedImageDF['Word'].str.startswith("GIV"))]
+                    GivenNameValid = GivenDF.shape[0] == 1
+                    print("Given Name Valid: ",GivenNameValid)
+                    print("")
+                    ############# Validity Check For Nationality ################
+                    NationalityDF = ConvertedImageDF[(ConvertedImageDF['Word'].str.startswith("NATION")) | (ConvertedImageDF['Word'].str.endswith("NALITY"))]
+                    NationalityValid = NationalityDF.shape[0] == 1
+                    print("Nationality Valid: ",NationalityValid)
+                    print("")
+                    ############ Validity Check for whole dataframe
+                    GVAWorks = DatesValid and PassportNumberValid and PlaceValid and SurnameValid and GivenNameValid and NationalityValid
+                    if not(GVAWorks):
+                        return {'Msg':'Error','Description':'All required keywords are not present in GVA output'}
+                except Exception as e:
+                    print(e)
+                    return {'Msg':'Error','Description':'Unable to check if all required keywords are present or not in GVA output'}
+                ################ Get Date Of Birth, Issue and Expiry ##################################
+                try:
+                    DatesDF = ConvertedImageDF[ConvertedImageDF['Word'].isin(Dates)]
+                    PlaceBottom = PlaceDF['Bottom'][0]
+                    DOBDF = DatesDF[DatesDF['Bottom']<PlaceBottom].reset_index(drop=True)
+                    OtherDates = DatesDF[DatesDF['Top']>PlaceBottom].reset_index(drop=True)
+                    if DOBDF.shape[0] == 1:
+                        DateOfBirth = DOBDF['Word'][0]
+                    if OtherDates.shape[0] == 2:
+                        OtherDates = OtherDates.sort_values(by='Left').reset_index(drop=True)
+                        DateOfIssue = OtherDates['Word'][0].strip()
+                        DateOfExpiry = OtherDates['Word'][1].strip()
+                except Exception as e:
+                    print(e)
+                    return {'Msg':'Error','Description':'Unable to get dates from GVA output'}
+                ################# Get Sex and Passport Number ############################
+                try:
+                    for word in list(ConvertedImageDF['Word']):
+                        if word.strip() == "F":
+                            Sex = "Female"
+                            break
+                        elif word.strip() == "M":
+                            Sex = "Male"
+                            break
+                except Exception as e:
+                    print(e)
+                    return {'Msg':'Error','Description':'Unable to get Sex from GVA output'}
+                ################ Get Surname and Given Names ################################
+                try:
+                    SurnameBottom = list(SurnameDF['Bottom'])[0]
+                    GivenTop = list(GivenDF['Top'])[0]
+                    GivenBottom = list(GivenDF['Bottom'])[0]
+                    NationalityTop = list(NationalityDF['Top'])[0]
+                    SurnameValueDF = ConvertedImageDF[(ConvertedImageDF['Bottom'] > SurnameBottom) & (ConvertedImageDF['Top'] < GivenTop-15)]
+                    SurnameValueDF=SurnameValueDF.sort_values(by='Left').reset_index(drop=True)
+                    Surname = GetValidValues(SurnameValueDF)
+                    GivenNameDF = ConvertedImageDF[(ConvertedImageDF['Bottom'] > GivenBottom) & (ConvertedImageDF['Top'] < NationalityTop-20)]
+                    GivenNameDF=GivenNameDF.sort_values(by='Left').reset_index(drop=True)
+                    GivenName = GetValidValues(GivenNameDF)
+                except Exception as e:
+                    print(e)
+                    return {'Msg':'Error','Description':'Unable to get Surname and Given Name from GVA output'}
+                ##################### Get Place Of Issue and Place Of Birth #####################################
+                try:
+                    PlaceDFSorted = PlaceDF.sort_values(by='Top').reset_index(drop=True)
+                    LastPlaceBottom = PlaceDFSorted['Bottom'][1]
+                    ConvertedImageDFAfterPlaceOfIssue = ConvertedImageDF[ConvertedImageDF['Bottom'] > LastPlaceBottom]
+                    ConvertedImageDFAfterPlaceOfIssue = ConvertedImageDFAfterPlaceOfIssue.sort_values(by='Top')
+                    AfterPlaceOfIssueWords=list(ConvertedImageDFAfterPlaceOfIssue['Word'])
+                    for word in AfterPlaceOfIssueWords:
+                        for place in ListOfPlaceOfIssue:
+                            if place in word.strip():
+                                PlaceOfIssue = place
+                                break
+                    FirstPlaceBottom = PlaceDFSorted['Bottom'][0]
+                    FirstPlaceTop = PlaceDFSorted['Top'][0]
+                    PlaceOfBirthDF = ConvertedImageDF[(ConvertedImageDF['Bottom'] > FirstPlaceBottom+10) &
+                                                      (ConvertedImageDF['Bottom'] < LastPlaceBottom-10)]
+                    PlaceOfBirthDF = PlaceOfBirthDF.sort_values(by='Left').reset_index(drop=True)
+                    PlaceOfBirth = GetValidValues(PlaceOfBirthDF)
+                except Exception as e:
+                    print(e)
+                    os.remove(DownloadFilePath)
+                    return {'Msg':'Error','Description':'Unable to get Place Of Issue and Place Of Birth from GVA output'}
+                ########################## Grab Nationality #########################################
+                try:
+                    if (FirstPlaceTop != ""):
+                        NationalityBottom = list(NationalityDF['Bottom'])[0]
+                        NationalityValuesDF = ConvertedImageDF[(ConvertedImageDF['Bottom']>NationalityBottom) &
+                        (ConvertedImageDF['Top']<FirstPlaceTop-15)]
+                        NationalityValuesDF = NationalityValuesDF.sort_values(by='Left').reset_index(drop=True)
+                        Nationality = GetValidValues(NationalityValuesDF).split()[0]
+                except Exception as e:
+                    print(e)
+                    return {'Msg':'Error','Description':'Unable to get Nationality from GVA output'}
+                ###################### Return Response ################################
+                ResponseDict=dict(Msg='Success',PassportNumber=PassportNumber,Surname=Surname,GivenName=GivenName,
+                Nationality=Nationality,Sex=Sex,DateOfBirth=DateOfBirth,PlaceOfIssue=PlaceOfIssue,
+                DateOfIssue=DateOfIssue,DateOfExpiry=DateOfExpiry,Method="GoogleVisionAPI")
+                return ResponseDict
+        except Exception as e:
+            print(e)
+            if os.path.exists(DownloadFilePath):
+                os.remove(DownloadFilePath)
+            return {'Msg':'Error','Description':'Unknown Exception Happened. Please make sure that the Image Orientation is upright.'}
 #################### Configure URLs #########################
 api.add_resource(PANCardOCR,'/PancardOCR')
 api.add_resource(AadharFrontOCR,'/AadharFrontOCR')
 api.add_resource(AadharBackOCR,'/AadharBackOCR')
+api.add_resource(PassportFrontOCR,'/PassportFrontOCR')
 #################  Run Flask Server ##########################
 if __name__ == '__main__':
     app.run(debug = True,host='0.0.0.0')
